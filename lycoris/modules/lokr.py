@@ -359,25 +359,22 @@ class LokrModule(LycorisBaseModule):
             self.register_buffer(
                 "scalar", torch.ones_like(self.scalar), persistent=False
             )
-        # Recompute dora_scale from current merged weights for stability
+        # Recompute dora_scale from original weight norm for stability
         if self.wd and need_recompute_dora:
             with torch.no_grad():
-                dtype = self.dtype
-                device = self.org_module[0].weight.device
-                diff_weight = self.get_weight(self.shape).to(dtype)
-                merged = self.org_module[0].weight.data.to(dtype) + diff_weight
+                weight = self.org_module[0].weight.data.float()
                 if self.wd_on_out:
                     weight_norm = (
-                        merged.reshape(merged.shape[0], -1)
+                        weight.reshape(weight.shape[0], -1)
                         .norm(dim=1, keepdim=True)
-                        .reshape(merged.shape[0], *[1] * (merged.dim() - 1))
+                        .reshape(weight.shape[0], *[1] * (weight.dim() - 1))
                     )
                 else:
                     weight_norm = (
-                        merged.transpose(0, 1)
-                        .reshape(merged.shape[1], -1)
+                        weight.transpose(0, 1)
+                        .reshape(weight.shape[1], -1)
                         .norm(dim=1, keepdim=True)
-                        .reshape(merged.shape[1], *[1] * (merged.dim() - 1))
+                        .reshape(weight.shape[1], *[1] * (weight.dim() - 1))
                         .transpose(0, 1)
                     )
                 if isinstance(self.dora_scale, nn.Parameter):
