@@ -183,16 +183,13 @@ class LoConModule(LycorisBaseModule):
 
     def load_weight_hook(self, module: nn.Module, incompatible_keys):
         missing_keys = incompatible_keys.missing_keys
+        need_recompute_dora = False
         for key in list(missing_keys):
             if "scalar" in key:
                 del missing_keys[missing_keys.index(key)]
-            # Backward compatibility: if training with DoRA but loading LoRA weights without dora_scale
-            # initialize dora_scale to 1.0 (neutral) so it doesn't over-scale.
+            # If dora_scale missing in incoming weights, mark to recompute from merged weight
             if "dora_scale" in key and hasattr(self, "dora_scale"):
-                if isinstance(self.dora_scale, nn.Parameter):
-                    self.dora_scale.data.copy_(torch.ones_like(self.dora_scale))
-                else:
-                    self.dora_scale.copy_(torch.ones_like(self.dora_scale))
+                need_recompute_dora = True
                 del missing_keys[missing_keys.index(key)]
         if isinstance(self.scalar, nn.Parameter):
             self.scalar.data.copy_(torch.ones_like(self.scalar))
@@ -202,6 +199,32 @@ class LoConModule(LycorisBaseModule):
             self.register_buffer(
                 "scalar", torch.ones_like(self.scalar), persistent=False
             )
+        # Recompute dora_scale from current merged weights for stability
+        if self.wd and need_recompute_dora:
+            with torch.no_grad():
+                dtype = self.dtype
+                device = self.org_module[0].weight.device
+                diff_weight = self.make_weight(device=device).to(dtype) * self.scale
+                weight = self.org_module[0].weight.data.to(dtype)
+                merged = weight + diff_weight
+                if self.wd_on_out:
+                    weight_norm = (
+                        merged.reshape(merged.shape[0], -1)
+                        .norm(dim=1, keepdim=True)
+                        .reshape(merged.shape[0], *[1] * (merged.dim() - 1))
+                    )
+                else:
+                    weight_norm = (
+                        merged.transpose(1, 0)
+                        .reshape(merged.shape[1], -1)
+                        .norm(dim=1, keepdim=True)
+                        .reshape(merged.shape[1], *[1] * (merged.dim() - 1))
+                        .transpose(1, 0)
+                    )
+                if isinstance(self.dora_scale, nn.Parameter):
+                    self.dora_scale.data.copy_(weight_norm.to(self.dora_scale))
+                else:
+                    self.dora_scale.copy_(weight_norm.to(self.dora_scale))
 
     def make_weight(self, device=None):
         wa = self.lora_up.weight.to(device)
