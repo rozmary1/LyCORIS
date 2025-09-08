@@ -343,8 +343,15 @@ class LokrModule(LycorisBaseModule):
 
     def load_weight_hook(self, module: nn.Module, incompatible_keys):
         missing_keys = incompatible_keys.missing_keys
-        for key in missing_keys:
+        for key in list(missing_keys):
             if "scalar" in key:
+                del missing_keys[missing_keys.index(key)]
+            # Backward compatibility for DoRA: initialize absent dora_scale to 1.0
+            if "dora_scale" in key and hasattr(self, "dora_scale"):
+                if isinstance(self.dora_scale, nn.Parameter):
+                    self.dora_scale.data.copy_(torch.ones_like(self.dora_scale))
+                else:
+                    self.dora_scale.copy_(torch.ones_like(self.dora_scale))
                 del missing_keys[missing_keys.index(key)]
         if isinstance(self.scalar, nn.Parameter):
             self.scalar.data.copy_(torch.ones_like(self.scalar))
