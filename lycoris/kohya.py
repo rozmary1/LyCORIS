@@ -63,6 +63,22 @@ def create_network(
     rs_lora = str_bool(kwargs.get("rs_lora", False))
     unbalanced_factorization = str_bool(kwargs.get("unbalanced_factorization", False))
     train_t5xxl = str_bool(kwargs.get("train_t5xxl", False))
+    # dora controls
+    dora_lr_ratio = (
+        float(kwargs.get("dora_lr_ratio", None))
+        if kwargs.get("dora_lr_ratio", None) is not None
+        else None
+    )
+    dora_clip_min = (
+        float(kwargs.get("dora_clip_min", None))
+        if kwargs.get("dora_clip_min", None) is not None
+        else None
+    )
+    dora_clip_max = (
+        float(kwargs.get("dora_clip_max", None))
+        if kwargs.get("dora_clip_max", None) is not None
+        else None
+    )
     # lora_plus
     loraplus_lr_ratio = (
         float(kwargs.get("loraplus_lr_ratio", None))
@@ -132,6 +148,9 @@ def create_network(
         rs_lora=rs_lora,
         unbalanced_factorization=unbalanced_factorization,
         train_t5xxl=train_t5xxl,
+        dora_lr_ratio=dora_lr_ratio,
+        dora_clip_min=dora_clip_min,
+        dora_clip_max=dora_clip_max,
     )
     if (
         loraplus_lr_ratio is not None
@@ -322,6 +341,9 @@ class LycorisNetworkKohya(LycorisNetwork):
         norm_modules=NormModule,
         train_norm=False,
         train_t5xxl=False,
+        dora_lr_ratio=None,
+        dora_clip_min=None,
+        dora_clip_max=None,
         **kwargs,
     ) -> None:
         torch.nn.Module.__init__(self)
@@ -334,6 +356,11 @@ class LycorisNetworkKohya(LycorisNetwork):
         self.loraplus_lr_ratio = None
         self.loraplus_unet_lr_ratio = None
         self.loraplus_text_encoder_lr_ratio = None
+
+        # dora controls
+        self.dora_lr_ratio = dora_lr_ratio
+        self.dora_clip_min = dora_clip_min
+        self.dora_clip_max = dora_clip_max
 
         if not self.ENABLE_CONV:
             conv_lora_dim = 0
@@ -672,11 +699,13 @@ class LycorisNetworkKohya(LycorisNetwork):
         lr_descriptions = []
 
         def assemble_params(loras, lr, ratio):
-            param_groups = {"lora": {}, "plus": {}}
+            param_groups = {"lora": {}, "plus": {}, "dora": {}}
             for lora in loras:
                 for name, param in lora.named_parameters():
                     if ratio is not None and "lora_up" in name:
                         param_groups["plus"][f"{lora.lora_name}.{name}"] = param
+                    elif "dora_scale" in name:
+                        param_groups["dora"][f"{lora.lora_name}.{name}"] = param
                     else:
                         param_groups["lora"][f"{lora.lora_name}.{name}"] = param
 
@@ -691,6 +720,8 @@ class LycorisNetworkKohya(LycorisNetwork):
                 if lr is not None:
                     if key == "plus":
                         param_data["lr"] = lr * ratio
+                    elif key == "dora" and self.dora_lr_ratio is not None:
+                        param_data["lr"] = lr * self.dora_lr_ratio
                     else:
                         param_data["lr"] = lr
 
@@ -702,7 +733,12 @@ class LycorisNetworkKohya(LycorisNetwork):
                     continue
 
                 params.append(param_data)
-                descriptions.append("plus" if key == "plus" else "")
+                if key == "plus":
+                    descriptions.append("plus")
+                elif key == "dora":
+                    descriptions.append("dora")
+                else:
+                    descriptions.append("")
 
             return params, descriptions
 
@@ -741,7 +777,18 @@ class LycorisNetworkKohya(LycorisNetwork):
         self.train()
 
     def on_step_start(self, *args):
-        pass
+        # Clamp DoRA scales if requested
+        if self.dora_clip_min is None and self.dora_clip_max is None:
+            return
+        clip_min = self.dora_clip_min
+        clip_max = self.dora_clip_max
+        for lora in self.unet_loras + self.text_encoder_loras:
+            if hasattr(lora, "wd") and lora.wd and hasattr(lora, "dora_scale"):
+                with torch.no_grad():
+                    lora.dora_scale.data.clamp_(
+                        clip_min if clip_min is not None else -torch.inf,
+                        clip_max if clip_max is not None else torch.inf,
+                    )
 
     def get_trainable_params(self):
         return self.parameters()

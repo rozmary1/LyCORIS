@@ -343,8 +343,13 @@ class LokrModule(LycorisBaseModule):
 
     def load_weight_hook(self, module: nn.Module, incompatible_keys):
         missing_keys = incompatible_keys.missing_keys
-        for key in missing_keys:
+        need_recompute_dora = False
+        for key in list(missing_keys):
             if "scalar" in key:
+                del missing_keys[missing_keys.index(key)]
+            # Mark to recompute dora_scale from merged weight if missing
+            if "dora_scale" in key and hasattr(self, "dora_scale"):
+                need_recompute_dora = True
                 del missing_keys[missing_keys.index(key)]
         if isinstance(self.scalar, nn.Parameter):
             self.scalar.data.copy_(torch.ones_like(self.scalar))
@@ -354,6 +359,28 @@ class LokrModule(LycorisBaseModule):
             self.register_buffer(
                 "scalar", torch.ones_like(self.scalar), persistent=False
             )
+        # Recompute dora_scale from original weight norm for stability
+        if self.wd and need_recompute_dora:
+            with torch.no_grad():
+                weight = self.org_module[0].weight.data.float()
+                if self.wd_on_out:
+                    weight_norm = (
+                        weight.reshape(weight.shape[0], -1)
+                        .norm(dim=1, keepdim=True)
+                        .reshape(weight.shape[0], *[1] * (weight.dim() - 1))
+                    )
+                else:
+                    weight_norm = (
+                        weight.transpose(0, 1)
+                        .reshape(weight.shape[1], -1)
+                        .norm(dim=1, keepdim=True)
+                        .reshape(weight.shape[1], *[1] * (weight.dim() - 1))
+                        .transpose(0, 1)
+                    )
+                if isinstance(self.dora_scale, nn.Parameter):
+                    self.dora_scale.data.copy_(weight_norm.to(self.dora_scale))
+                else:
+                    self.dora_scale.copy_(weight_norm.to(self.dora_scale))
 
     def get_weight(self, shape):
         weight = make_kron(
